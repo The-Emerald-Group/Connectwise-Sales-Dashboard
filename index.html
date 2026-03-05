@@ -29,7 +29,6 @@
   .logo { font-size: 1rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: white; display: flex; align-items: center; gap: 20px; }
   .logo span { color: var(--good); }
   
-  /* Dropdown Styles */
   select.timeframe-select { background: #1a1a1a; color: white; border: 1px solid #333; padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; font-family: inherit; cursor: pointer; outline: none; transition: 0.2s; }
   select.timeframe-select:hover { border-color: var(--good); }
 
@@ -71,6 +70,23 @@
   .stat-box .val { font-size: 1.4rem; font-weight: 800; line-height: 1; margin-bottom: 2px; color: white;}
   .stat-box .lbl { font-size: .65rem; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
 
+  /* Order Dropdown Styles */
+  .toggle-orders-btn { background: none; border: none; color: #888; font-size: 0.75rem; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; width: 100%; text-align: center; margin-top: 18px; padding: 6px; border-radius: 4px; transition: 0.2s; background: rgba(255,255,255,0.02); }
+  .toggle-orders-btn:hover { color: white; background: rgba(255,255,255,0.06); }
+  
+  .order-dropdown { display: none; margin-top: 10px; border-top: 1px solid #333; padding-top: 5px; max-height: 220px; overflow-y: auto; padding-right: 5px; }
+  /* Scrollbar styling for dropdown */
+  .order-dropdown::-webkit-scrollbar { width: 4px; }
+  .order-dropdown::-webkit-scrollbar-track { background: #161616; }
+  .order-dropdown::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+
+  .order-item { display: flex; justify-content: space-between; font-size: 0.75rem; padding: 8px 0; border-bottom: 1px dashed #222; align-items: center;}
+  .order-item:last-child { border-bottom: none; }
+  .order-title { color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; font-weight: 600;}
+  .order-vals { text-align: right; }
+  .order-vals span { display: block; line-height: 1.3;}
+  .order-profit { color: var(--warn); font-size: 0.65rem; }
+
   /* Trend chart */
   .chart-container { background: var(--card-bg); border-radius: 12px; padding: 20px; }
   .chart-wrap { position: relative; height: 260px; }
@@ -105,13 +121,23 @@
 let REFRESH_INTERVAL = parseInt('{{ refresh_interval }}') || 300;
 let trendChart = null;
 
-// Auto-refresh using current dropdown value
 setInterval(() => loadStats(), REFRESH_INTERVAL * 1000);
 
-// Helper to format money into £
 const formatMoney = (amount) => {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(amount);
 };
+
+// Controls the opening and closing of the order list
+function toggleOrders(btn) {
+  const dropdown = btn.nextElementSibling;
+  if (dropdown.style.display === 'block') {
+    dropdown.style.display = 'none';
+    btn.innerHTML = btn.innerHTML.replace('▲', '▼');
+  } else {
+    dropdown.style.display = 'block';
+    btn.innerHTML = btn.innerHTML.replace('▼', '▲');
+  }
+}
 
 async function loadStats() {
   const daysSelected = document.getElementById('timeframeFilter').value;
@@ -129,7 +155,6 @@ async function loadStats() {
 
     const { totals, users, daily, daysBack } = data;
 
-    // KPI bar
     const kpiHTML = `
       <div class="kpi-bar">
         <div class="kpi-card revenue">
@@ -154,15 +179,32 @@ async function loadStats() {
         </div>
       </div>`;
 
-    // Trend chart section
     const trendHTML = `
       <div class="section-gap">
         <div class="section-header"><span class="section-title">Sales Pipeline Trend</span></div>
         <div class="chart-container"><div class="chart-wrap"><canvas id="trendChart"></canvas></div></div>
       </div>`;
 
-    // User cards (Only shows users with > 0 revenue)
+    // User cards with Order Dropdown
     const userCards = users.map(u => {
+      
+      // Generate the inner HTML for the orders list
+      const ordersHTML = u.orders.map(o => `
+        <div class="order-item">
+          <div class="order-title" title="${o.title}">#${o.id}: ${o.title}</div>
+          <div class="order-vals">
+            <span style="color:var(--good); font-weight:bold;">${formatMoney(o.total)}</span>
+            <span class="order-profit">Profit: ${formatMoney(o.profit)}</span>
+          </div>
+        </div>
+      `).join('');
+
+      // Build the dropdown section if orders exist
+      const dropdownSection = u.orders.length > 0 
+        ? `<button class="toggle-orders-btn" onclick="toggleOrders(this)">View ${u.orders.length} Order${u.orders.length > 1 ? 's' : ''} ▼</button>
+           <div class="order-dropdown">${ordersHTML}</div>`
+        : `<div style="text-align:center; font-size: 0.7rem; color:#555; margin-top: 15px;">No Closed Orders Yet</div>`;
+
       return `<div class="user-card">
         <div class="user-header">
           <div class="user-name">${u.name}</div>
@@ -177,6 +219,7 @@ async function loadStats() {
           <div class="stat-box"><div class="val">${u.win_rate}%</div><div class="lbl">Win Rate</div></div>
           <div class="stat-box"><div class="val">${u.activities}</div><div class="lbl">Activities</div></div>
         </div>
+        ${dropdownSection}
       </div>`;
     }).join('');
 
@@ -186,7 +229,6 @@ async function loadStats() {
         <div class="grid">${userCards || '<p style="color:var(--text-dim);font-size:.8rem; grid-column: 1 / -1; text-align:center; padding: 40px;">No sales reps have generated revenue in this timeframe.</p>'}</div>
       </div>`;
 
-    // Render Line Chart
     if (trendChart) { trendChart.destroy(); }
     const ctx = document.getElementById('trendChart').getContext('2d');
     trendChart = new Chart(ctx, {
@@ -227,7 +269,6 @@ async function loadStats() {
   }
 }
 
-// Initial Load
 loadStats();
 </script>
 </body>
