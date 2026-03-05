@@ -21,7 +21,6 @@ VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 DEFAULT_DAYS_BACK = int(os.environ.get("CW_DAYS_BACK", "30"))
 
 # --- IN-MEMORY CACHE FOR ORDER COSTS ---
-# Stores { order_id: { "lastUpdated": "timestamp", "cost": 125.50 } }
 ORDER_COST_CACHE = {}
 
 def get_session():
@@ -91,8 +90,8 @@ def sales_stats():
         closed_params = {"conditions": f"closedDate >= [{since_str}]", "fields": "id,stage,status,primarySalesRep,closedDate"}
         closed_opps = cw_get("/sales/opportunities", closed_params)
 
-        # 2. Fetch Orders (Including _info for cache checking)
-        orders_params = {"conditions": f"orderDate >= [{since_str}]", "fields": "id,total,salesRep,_info"}
+        # 2. Fetch Orders
+        orders_params = {"conditions": f"orderDate >= [{since_str}]", "fields": "id,total,salesRep,_info,productIds"}
         recent_orders = cw_get("/sales/orders", orders_params)
 
         # 3. Fetch Activities
@@ -149,7 +148,7 @@ def sales_stats():
             else:
                 rep_lost[get_rep(o)] += 1
                 
-        # --- PROCESS ORDERS & CACHED LINE ITEMS ---
+        # --- PROCESS ORDERS & CACHED PRODUCT COSTS ---
         for ord in recent_orders:
             order_id = ord.get("id")
             last_updated = ord.get("_info", {}).get("lastUpdated", "")
@@ -158,19 +157,25 @@ def sales_stats():
             if order_id in ORDER_COST_CACHE and ORDER_COST_CACHE[order_id]["lastUpdated"] == last_updated:
                 total_cost = ORDER_COST_CACHE[order_id]["cost"]
             else:
-                # Cache miss! We must fetch the line items for this specific order
-                line_items = cw_get(f"/sales/orders/{order_id}/lineitems", {"fields": "id,cost,unitCost,quantity"})
-                
                 total_cost = 0.0
-                for item in line_items:
-                    # Some CW instances use 'cost' for the total line cost, others use unitCost * quantity
-                    if "cost" in item and item["cost"] is not None:
-                        total_cost += float(item["cost"])
-                    else:
-                        u_cost = float(item.get("unitCost") or 0.0)
-                        qty = float(item.get("quantity") or 0.0)
-                        total_cost += (u_cost * qty)
+                product_ids = ord.get("productIds", [])
                 
+                if product_ids:
+                    # Fetch product details for this order using the product IDs
+                    try:
+                        # Break into chunks of 50 to avoid URL length limit errors
+                        for i in range(0, len(product_ids), 50):
+                            chunk = product_ids[i:i+50]
+                            cond = "id in (" + ",".join(map(str, chunk)) + ")"
+                            products = cw_get("/procurement/products", {"conditions": cond, "fields": "id,cost,quantity"})
+                            
+                            for p in products:
+                                c = float(p.get("cost") or 0.0)
+                                q = float(p.get("quantity") or 1.0)
+                                total_cost += (c * q)
+                    except Exception as e:
+                        print(f"Failed to fetch products for order {order_id}: {str(e)}")
+                        
                 # Save it to our cache so we don't have to fetch it next time
                 ORDER_COST_CACHE[order_id] = {
                     "lastUpdated": last_updated,
@@ -178,7 +183,7 @@ def sales_stats():
                 }
 
             rep_name = get_rep(ord, "salesRep")
-            rep_revenue[rep_name] += ord.get("total", 0.0)
+            rep_revenue[rep_name] += float(ord.get("total", 0.0))
             rep_cost[rep_name] += total_cost
             
         for act in recent_activities:
