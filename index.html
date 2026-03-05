@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ConnectWise Sales Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23161616' stroke='%23222' stroke-width='4'/%3E%3Cpath d='M25 70 L45 50 L60 65 L80 35' fill='none' stroke='%234cd964' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='80' cy='35' r='6' fill='%234cd964'/%3E%3C/svg%3E">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --crit: #ff3b30;
+    --warn: #ffcc00;
+    --good: #4cd964;
+    --bg: #0a0a0a;
+    --card-bg: #161616;
+    --blue: #0a84ff;
+    --purple: #bf5af2;
+    --border: #222222;
+    --text: #ffffff;
+    --text-dim: #888888;
+    --text-muted: #444444;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; padding: 20px; margin: 0; }
+
+  /* Header */
+  .header-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px solid #222; padding-bottom: 10px; }
+  .logo { font-size: 1rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: white; display: flex; align-items: center; gap: 20px; }
+  .logo span { color: var(--good); }
+  
+  /* Dropdown Styles */
+  select.timeframe-select { background: #1a1a1a; color: white; border: 1px solid #333; padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; font-family: inherit; cursor: pointer; outline: none; transition: 0.2s; }
+  select.timeframe-select:hover { border-color: var(--good); }
+
+  .last-harvest { text-align: right; }
+  .last-harvest-time { font-size: 1.2rem; font-weight: bold; color: var(--good); }
+  .last-harvest-label { font-size: 0.7rem; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* Summary KPI bar */
+  .kpi-bar { display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
+  .kpi-card { flex: 1; min-width: 160px; background: var(--card-bg); border-radius: 8px; padding: 18px 20px; border-left: 8px solid; }
+  .kpi-card.revenue { border-color: var(--good); }
+  .kpi-card.profit  { border-color: var(--warn); }
+  .kpi-card.won     { border-color: var(--purple); }
+  .kpi-card.hustle  { border-color: var(--blue); }
+  
+  .kpi-label { font-size: .7rem; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); margin-bottom: 8px; }
+  .kpi-value { font-size: 2.2rem; font-weight: 800; line-height: 1; }
+  .kpi-value.revenue { color: var(--good); }
+  .kpi-value.profit  { color: var(--warn); }
+  .kpi-value.won     { color: var(--purple); }
+  .kpi-value.hustle  { color: var(--blue); }
+  .kpi-sub { font-size: .72rem; color: var(--text-muted); margin-top: 4px; }
+
+  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .section-title { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-dim); }
+  .section-gap { margin-bottom: 40px; }
+
+  /* User cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 20px; align-items: start; }
+  .user-card { background: var(--card-bg); border-radius: 12px; padding: 20px; border-top: 2px solid #222;}
+  .user-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .user-name { font-size: 1.1rem; font-weight: 700; }
+  .user-revenue { font-size: 1.4rem; font-weight: 800; color: var(--good); }
+  
+  .finances { display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; margin-bottom: 15px; border-bottom: 1px solid #222; padding-bottom: 10px;}
+  
+  .stat-row { display: flex; gap: 12px; }
+  .stat-box { flex: 1; border-radius: 8px; padding: 12px 14px; text-align: center; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); }
+  .stat-box .val { font-size: 1.4rem; font-weight: 800; line-height: 1; margin-bottom: 2px; color: white;}
+  .stat-box .lbl { font-size: .65rem; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+
+  /* Trend chart */
+  .chart-container { background: var(--card-bg); border-radius: 12px; padding: 20px; }
+  .chart-wrap { position: relative; height: 260px; }
+
+  .loading { display: flex; align-items: center; justify-content: center; padding: 60px; color: var(--text-dim); gap: 12px; font-size: .8rem; }
+  .spinner { width: 18px; height: 18px; border: 2px solid #333; border-top-color: var(--good); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error-msg { padding: 30px; color: var(--crit); font-size: .8rem; }
+</style>
+</head>
+<body>
+
+<div class="header-container">
+  <div class="logo">
+    ConnectWise <span>Sales Dashboard</span>
+    <select id="timeframeFilter" class="timeframe-select" onchange="loadStats()">
+      <option value="1">Last 24 Hours</option>
+      <option value="7">Last 7 Days</option>
+      <option value="30" selected>Last 30 Days</option>
+      <option value="90">Last 90 Days</option>
+    </select>
+  </div>
+  <div class="last-harvest">
+    <div class="last-harvest-time" id="last-harvest-time">—</div>
+    <div class="last-harvest-label">Last harvest</div>
+  </div>
+</div>
+
+<div id="main-content"><div class="loading"><div class="spinner"></div>Loading sales stats…</div></div>
+
+<script>
+let REFRESH_INTERVAL = parseInt('{{ refresh_interval }}') || 300;
+let trendChart = null;
+
+// Auto-refresh using current dropdown value
+setInterval(() => loadStats(), REFRESH_INTERVAL * 1000);
+
+// Helper to format money into £
+const formatMoney = (amount) => {
+  return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(amount);
+};
+
+async function loadStats() {
+  const daysSelected = document.getElementById('timeframeFilter').value;
+  
+  try {
+    const res = await fetch(`/api/sales-stats?days=${daysSelected}`);
+    const data = await res.json();
+    if (data.error) {
+      document.getElementById('main-content').innerHTML = `<div class="error-msg">⚠ ${data.error}</div>`;
+      return;
+    }
+
+    const now = new Date().toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    document.getElementById('last-harvest-time').textContent = now;
+
+    const { totals, users, daily, daysBack } = data;
+
+    // KPI bar
+    const kpiHTML = `
+      <div class="kpi-bar">
+        <div class="kpi-card revenue">
+          <div class="kpi-label">Total Revenue</div>
+          <div class="kpi-value revenue">${formatMoney(totals.revenue)}</div>
+          <div class="kpi-sub">Last ${daysBack} days</div>
+        </div>
+        <div class="kpi-card profit">
+          <div class="kpi-label">Est. Profit</div>
+          <div class="kpi-value profit">${formatMoney(totals.profit)}</div>
+          <div class="kpi-sub">Revenue minus Cost</div>
+        </div>
+        <div class="kpi-card won">
+          <div class="kpi-label">Deals Won</div>
+          <div class="kpi-value won">${totals.won}</div>
+          <div class="kpi-sub">${totals.winRate}% Overall Win Rate</div>
+        </div>
+        <div class="kpi-card hustle">
+          <div class="kpi-label">Sales Activities</div>
+          <div class="kpi-value hustle">${totals.activities}</div>
+          <div class="kpi-sub">Calls, meetings, emails</div>
+        </div>
+      </div>`;
+
+    // Trend chart section
+    const trendHTML = `
+      <div class="section-gap">
+        <div class="section-header"><span class="section-title">Sales Pipeline Trend</span></div>
+        <div class="chart-container"><div class="chart-wrap"><canvas id="trendChart"></canvas></div></div>
+      </div>`;
+
+    // User cards (Only shows users with > 0 revenue)
+    const userCards = users.map(u => {
+      return `<div class="user-card">
+        <div class="user-header">
+          <div class="user-name">${u.name}</div>
+          <div class="user-revenue">${formatMoney(u.revenue)}</div>
+        </div>
+        <div class="finances">
+            <span>Cost: ${formatMoney(u.cost)}</span>
+            <span style="color:var(--warn); font-weight:bold;">Profit: ${formatMoney(u.profit)}</span>
+        </div>
+        <div class="stat-row">
+          <div class="stat-box"><div class="val">${u.won}</div><div class="lbl">Won</div></div>
+          <div class="stat-box"><div class="val">${u.win_rate}%</div><div class="lbl">Win Rate</div></div>
+          <div class="stat-box"><div class="val">${u.activities}</div><div class="lbl">Activities</div></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    document.getElementById('main-content').innerHTML = kpiHTML + trendHTML + `
+      <div class="section-gap">
+        <div class="section-header"><span class="section-title">Sales Rep Performance (Revenue Generators)</span></div>
+        <div class="grid">${userCards || '<p style="color:var(--text-dim);font-size:.8rem; grid-column: 1 / -1; text-align:center; padding: 40px;">No sales reps have generated revenue in this timeframe.</p>'}</div>
+      </div>`;
+
+    // Render Line Chart
+    if (trendChart) { trendChart.destroy(); }
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    trendChart = new Chart(ctx, {
+      type: 'line', 
+      data: {
+        labels: daily.map(d => d.date), 
+        datasets: [
+          { 
+            label: 'New Leads', 
+            data: daily.map(d => d.created), 
+            backgroundColor: 'rgba(10,132,255,0.1)', 
+            borderColor: 'rgba(10,132,255,0.8)', 
+            borderWidth: 2, 
+            tension: 0.3, fill: true
+          },
+          { 
+            label: 'Deals Won',  
+            data: daily.map(d => d.won),  
+            backgroundColor: 'rgba(191,90,242,0.1)', 
+            borderColor: 'rgba(191,90,242,0.8)', 
+            borderWidth: 2, 
+            tension: 0.3, fill: true
+          }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#888', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#888', maxTicksLimit: 14 }, grid: { color: '#1e1e1e' } },
+          y: { ticks: { color: '#888' }, grid: { color: '#1e1e1e' }, beginAtZero: true }
+        }
+      }
+    });
+
+  } catch(e) {
+    document.getElementById('main-content').innerHTML = `<div class="error-msg">⚠ ${e.message}</div>`;
+  }
+}
+
+// Initial Load
+loadStats();
+</script>
+</body>
+</html>
