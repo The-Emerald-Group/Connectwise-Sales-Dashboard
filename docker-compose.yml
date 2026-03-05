@@ -1,0 +1,33 @@
+services:
+  cw-sales-dashboard:
+    image: samuelstreets/connectwise-sales-dashboard:latest
+    container_name: Connectwise-Sales-Dashboard
+    ports:
+      - "5002:5000" # Mapped to 5002 to avoid conflicting with your ticket dashboards
+
+    environment:
+      # ── ConnectWise API credentials ────────────────────────────────────────
+      - CW_SITE=api-eu.myconnectwise.net
+      - CW_COMPANY=yourcompanyid
+      - CW_PUBLIC_KEY=your_public_key_here
+      - CW_PRIVATE_KEY=your_private_key_here
+      - CW_CLIENT_ID=your_client_id_here
+
+      # ── SSL verification ───────────────────────────────────────────────────
+      - CW_VERIFY_SSL=true
+
+      # ── HTTPS proxy (optional) ─────────────────────────────────────────────
+      # - HTTPS_PROXY=http://proxy.example.com:8080
+
+      # ── Refresh interval (seconds) ─────────────────────────────────────────
+      - CW_REFRESH_INTERVAL=300
+
+      # ── Default timeframe (days back) ──────────────────────────────────────
+      - CW_DAYS_BACK=30
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/config-check')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
