@@ -90,8 +90,8 @@ def sales_stats():
         closed_params = {"conditions": f"closedDate >= [{since_str}]", "fields": "id,stage,status,primarySalesRep,closedDate"}
         closed_opps = cw_get("/sales/opportunities", closed_params)
 
-        # 2. Fetch Orders
-        orders_params = {"conditions": f"orderDate >= [{since_str}]", "fields": "id,total,salesRep,_info,productIds"}
+        # 2. Fetch Orders (Added company and opportunity fields for the dropdown)
+        orders_params = {"conditions": f"orderDate >= [{since_str}]", "fields": "id,total,salesRep,_info,productIds,company,opportunity"}
         recent_orders = cw_get("/sales/orders", orders_params)
 
         # 3. Fetch Activities
@@ -132,6 +132,7 @@ def sales_stats():
         rep_revenue = defaultdict(float)
         rep_cost = defaultdict(float)
         rep_activities = defaultdict(int)
+        rep_orders = defaultdict(list) # NEW: Store individual orders
 
         def get_rep(obj, field="primarySalesRep"):
             rep = obj.get(field)
@@ -153,7 +154,7 @@ def sales_stats():
             order_id = ord.get("id")
             last_updated = ord.get("_info", {}).get("lastUpdated", "")
             
-            # Check if we have this exact version of the order cached
+            # Check cache
             if order_id in ORDER_COST_CACHE and ORDER_COST_CACHE[order_id]["lastUpdated"] == last_updated:
                 total_cost = ORDER_COST_CACHE[order_id]["cost"]
             else:
@@ -161,9 +162,7 @@ def sales_stats():
                 product_ids = ord.get("productIds", [])
                 
                 if product_ids:
-                    # Fetch product details for this order using the product IDs
                     try:
-                        # Break into chunks of 50 to avoid URL length limit errors
                         for i in range(0, len(product_ids), 50):
                             chunk = product_ids[i:i+50]
                             cond = "id in (" + ",".join(map(str, chunk)) + ")"
@@ -176,15 +175,27 @@ def sales_stats():
                     except Exception as e:
                         print(f"Failed to fetch products for order {order_id}: {str(e)}")
                         
-                # Save it to our cache so we don't have to fetch it next time
                 ORDER_COST_CACHE[order_id] = {
                     "lastUpdated": last_updated,
                     "cost": total_cost
                 }
 
             rep_name = get_rep(ord, "salesRep")
-            rep_revenue[rep_name] += float(ord.get("total", 0.0))
+            order_total = float(ord.get("total", 0.0))
+            
+            rep_revenue[rep_name] += order_total
             rep_cost[rep_name] += total_cost
+            
+            # NEW: Save individual order details for the dropdown
+            comp_name = ord.get("company", {}).get("name", "Unknown Company")
+            opp_name = ord.get("opportunity", {}).get("name", "Direct Order")
+            
+            rep_orders[rep_name].append({
+                "id": order_id,
+                "title": f"{comp_name} - {opp_name}",
+                "total": order_total,
+                "profit": order_total - total_cost
+            })
             
         for act in recent_activities:
             rep_activities[get_rep(act, "assignTo")] += 1
@@ -193,13 +204,15 @@ def sales_stats():
 
         users_result = []
         for name in sorted(all_reps):
-            # FILTER: Exclude Unassigned AND anyone with £0 revenue
             if name.lower() == "unassigned": continue
             if rep_revenue[name] <= 0: continue 
 
             total_closed = rep_won[name] + rep_lost[name]
             win_rate = round((rep_won[name] / total_closed * 100)) if total_closed > 0 else 0
             profit = rep_revenue[name] - rep_cost[name]
+            
+            # Sort individual orders from highest revenue to lowest
+            sorted_orders = sorted(rep_orders[name], key=lambda x: x["total"], reverse=True)
 
             users_result.append({
                 "name": name,
@@ -210,10 +223,11 @@ def sales_stats():
                 "revenue": rep_revenue[name],
                 "cost": rep_cost[name],
                 "profit": profit,
-                "activities": rep_activities[name]
+                "activities": rep_activities[name],
+                "orders": sorted_orders # NEW: Include the orders array
             })
 
-        # Sort by most Revenue
+        # Sort reps by most Revenue
         users_result.sort(key=lambda u: u["revenue"], reverse=True)
 
         total_won = sum(rep_won.values())
