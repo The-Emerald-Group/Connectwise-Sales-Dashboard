@@ -20,7 +20,6 @@ REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "300"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 DEFAULT_DAYS_BACK = int(os.environ.get("CW_DAYS_BACK", "30"))
 
-# --- IN-MEMORY CACHE FOR ORDER COSTS ---
 ORDER_COST_CACHE = {}
 
 def get_session():
@@ -45,24 +44,17 @@ def cw_get(endpoint, params=None):
     all_results = []
     page = 1
     page_size = 100
-
-    if params is None:
-        params = {}
-
+    if params is None: params = {}
     session = get_session()
-
     while True:
         paged_params = {**params, "page": page, "pageSize": page_size}
         response = session.get(url, headers=headers, params=paged_params, timeout=90)
         response.raise_for_status()
         data = response.json()
-        if not data:
-            break
+        if not data: break
         all_results.extend(data)
-        if len(data) < page_size:
-            break
+        if len(data) < page_size: break
         page += 1
-
     return all_results
 
 @app.route("/")
@@ -71,194 +63,114 @@ def index():
 
 @app.route("/api/sales-stats")
 def sales_stats():
-    days_param = request.args.get('days')
-    try:
-        days_back_val = int(days_param)
-    except (TypeError, ValueError):
-        days_back_val = DEFAULT_DAYS_BACK
+    timeframe_param = request.args.get('timeframe', str(DEFAULT_DAYS_BACK))
+    now = datetime.now(timezone.utc)
+    year = now.year
 
     try:
-        now = datetime.now(timezone.utc)
-        start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        since = start_of_today - timedelta(days=max(0, days_back_val - 1))
-        since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if timeframe_param in ['Q1', 'Q2', 'Q3', 'Q4']:
+            if timeframe_param == 'Q1':
+                since = datetime(year, 1, 1, tzinfo=timezone.utc)
+                until = datetime(year, 3, 31, 23, 59, 59, tzinfo=timezone.utc)
+            elif timeframe_param == 'Q2':
+                since = datetime(year, 4, 1, tzinfo=timezone.utc)
+                until = datetime(year, 6, 30, 23, 59, 59, tzinfo=timezone.utc)
+            elif timeframe_param == 'Q3':
+                since = datetime(year, 7, 1, tzinfo=timezone.utc)
+                until = datetime(year, 9, 30, 23, 59, 59, tzinfo=timezone.utc)
+            elif timeframe_param == 'Q4':
+                since = datetime(year, 10, 1, tzinfo=timezone.utc)
+                until = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+            if now < since:
+                year -= 1
+                since, until = since.replace(year=year), until.replace(year=year)
+            timeframe_label = f"{timeframe_param} {year}"
+        else:
+            try: days_back_val = int(timeframe_param)
+            except: days_back_val = DEFAULT_DAYS_BACK
+            since = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=max(0, days_back_val - 1))
+            until = now
+            timeframe_label = "Last 24 Hours" if days_back_val == 1 else f"Last {days_back_val} Days"
 
-        # 1. Fetch Opportunities
-        created_params = {"conditions": f"dateBecameLead >= [{since_str}]", "fields": "id,primarySalesRep,dateBecameLead"}
-        created_opps = cw_get("/sales/opportunities", created_params)
+        since_str, until_str = since.strftime("%Y-%m-%dT%H:%M:%SZ"), until.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        closed_params = {"conditions": f"closedDate >= [{since_str}]", "fields": "id,stage,status,primarySalesRep,closedDate"}
-        closed_opps = cw_get("/sales/opportunities", closed_params)
+        # Fetch Data
+        created_opps = cw_get("/sales/opportunities", {"conditions": f"dateBecameLead >= [{since_str}] and dateBecameLead <= [{until_str}]", "fields": "id,primarySalesRep,dateBecameLead"})
+        closed_opps = cw_get("/sales/opportunities", {"conditions": f"closedDate >= [{since_str}] and closedDate <= [{until_str}]", "fields": "id,stage,status,primarySalesRep,closedDate"})
+        recent_orders = cw_get("/sales/orders", {"conditions": f"orderDate >= [{since_str}] and orderDate <= [{until_str}]", "fields": "id,total,salesRep,_info,productIds,company,opportunity"})
+        recent_activities = cw_get("/sales/activities", {"conditions": f"dateStart >= [{since_str}] and dateStart <= [{until_str}]", "fields": "id,assignTo"})
 
-        # 2. Fetch Orders (Added company and opportunity fields for the dropdown)
-        orders_params = {"conditions": f"orderDate >= [{since_str}]", "fields": "id,total,salesRep,_info,productIds,company,opportunity"}
-        recent_orders = cw_get("/sales/orders", orders_params)
-
-        # 3. Fetch Activities
-        activities_params = {"conditions": f"dateStart >= [{since_str}]", "fields": "id,assignTo"}
-        recent_activities = cw_get("/sales/activities", activities_params)
-
-        # --- Build Daily Buckets ---
+        # Chart Buckets
         daily_buckets = {}
-        for i in range(days_back_val):
+        days_range = (until.date() - since.date()).days + 1
+        for i in range(days_range):
             day_dt = since + timedelta(days=i)
-            day_key_str = day_dt.strftime("%Y-%m-%d")
-            day_name = day_dt.strftime("%d %b") if days_back_val > 7 else day_dt.strftime("%A")
-            daily_buckets[day_key_str] = {"date": day_name, "created": 0, "won": 0}
-
-        def get_day_key(iso):
-            try:
-                if not iso: return None
-                return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%Y-%m-%d")
-            except:
-                return None
+            daily_buckets[day_dt.strftime("%Y-%m-%d")] = {"date": day_dt.strftime("%d %b") if days_range > 7 else day_dt.strftime("%A"), "created": 0, "won": 0}
 
         for o in created_opps:
-            k = get_day_key(o.get("dateBecameLead"))
-            if k and k in daily_buckets: daily_buckets[k]["created"] += 1
-
+            k = datetime.fromisoformat(o["dateBecameLead"].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+            if k in daily_buckets: daily_buckets[k]["created"] += 1
         for o in closed_opps:
-            k = get_day_key(o.get("closedDate"))
-            if k and k in daily_buckets:
-                stage_name = o.get("stage", {}).get("name", "").lower()
-                status_name = o.get("status", {}).get("name", "").lower()
-                if "won" in stage_name or "won" in status_name:
+            k = datetime.fromisoformat(o["closedDate"].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+            if k in daily_buckets:
+                if "won" in o.get("stage", {}).get("name", "").lower() or "won" in o.get("status", {}).get("name", "").lower():
                     daily_buckets[k]["won"] += 1
 
-        # --- Per-Sales Rep Aggregation ---
-        rep_created = defaultdict(int)
-        rep_won = defaultdict(int)
-        rep_lost = defaultdict(int)
-        rep_revenue = defaultdict(float)
-        rep_cost = defaultdict(float)
-        rep_activities = defaultdict(int)
-        rep_orders = defaultdict(list) # NEW: Store individual orders
-
-        def get_rep(obj, field="primarySalesRep"):
-            rep = obj.get(field)
-            if isinstance(rep, dict): return rep.get("name", "Unassigned")
-            return "Unassigned"
-
-        for o in created_opps: rep_created[get_rep(o)] += 1
+        # Aggregation
+        rep_data = defaultdict(lambda: {"created": 0, "won": 0, "lost": 0, "revenue": 0.0, "cost": 0.0, "activities": 0, "orders": []})
         
+        def get_rep_name(obj, field="primarySalesRep"):
+            rep = obj.get(field)
+            return rep.get("name", "Unassigned") if isinstance(rep, dict) else "Unassigned"
+
+        for o in created_opps: rep_data[get_rep_name(o)]["created"] += 1
         for o in closed_opps:
-            stage_name = o.get("stage", {}).get("name", "").lower()
-            status_name = o.get("status", {}).get("name", "").lower()
-            if "won" in stage_name or "won" in status_name:
-                rep_won[get_rep(o)] += 1
-            else:
-                rep_lost[get_rep(o)] += 1
-                
-        # --- PROCESS ORDERS & CACHED PRODUCT COSTS ---
+            key = "won" if ("won" in o.get("stage",{}).get("name","").lower() or "won" in o.get("status",{}).get("name","").lower()) else "lost"
+            rep_data[get_rep_name(o)][key] += 1
+        for act in recent_activities: rep_data[get_rep_name(act, "assignTo")]["activities"] += 1
+
         for ord in recent_orders:
-            order_id = ord.get("id")
-            last_updated = ord.get("_info", {}).get("lastUpdated", "")
-            
-            # Check cache
+            order_id, last_updated = ord["id"], ord["_info"]["lastUpdated"]
             if order_id in ORDER_COST_CACHE and ORDER_COST_CACHE[order_id]["lastUpdated"] == last_updated:
                 total_cost = ORDER_COST_CACHE[order_id]["cost"]
             else:
                 total_cost = 0.0
-                product_ids = ord.get("productIds", [])
-                
-                if product_ids:
-                    try:
-                        for i in range(0, len(product_ids), 50):
-                            chunk = product_ids[i:i+50]
-                            cond = "id in (" + ",".join(map(str, chunk)) + ")"
-                            products = cw_get("/procurement/products", {"conditions": cond, "fields": "id,cost,quantity"})
-                            
-                            for p in products:
-                                c = float(p.get("cost") or 0.0)
-                                q = float(p.get("quantity") or 1.0)
-                                total_cost += (c * q)
-                    except Exception as e:
-                        print(f"Failed to fetch products for order {order_id}: {str(e)}")
-                        
-                ORDER_COST_CACHE[order_id] = {
-                    "lastUpdated": last_updated,
-                    "cost": total_cost
-                }
+                if ord.get("productIds"):
+                    products = cw_get("/procurement/products", {"conditions": f"id in ({','.join(map(str, ord['productIds']))})", "fields": "cost,quantity"})
+                    for p in products: total_cost += float(p.get("cost") or 0.0) * float(p.get("quantity") or 1.0)
+                ORDER_COST_CACHE[order_id] = {"lastUpdated": last_updated, "cost": total_cost}
 
-            rep_name = get_rep(ord, "salesRep")
-            order_total = float(ord.get("total", 0.0))
-            
-            rep_revenue[rep_name] += order_total
-            rep_cost[rep_name] += total_cost
-            
-            # NEW: Save individual order details for the dropdown
-            comp_name = ord.get("company", {}).get("name", "Unknown Company")
-            opp_name = ord.get("opportunity", {}).get("name", "Direct Order")
-            
-            rep_orders[rep_name].append({
-                "id": order_id,
-                "title": f"{comp_name} - {opp_name}",
-                "total": order_total,
-                "profit": order_total - total_cost
-            })
-            
-        for act in recent_activities:
-            rep_activities[get_rep(act, "assignTo")] += 1
+            name = get_rep_name(ord, "salesRep")
+            rev = float(ord.get("total", 0.0))
+            rep_data[name]["revenue"] += rev
+            rep_data[name]["cost"] += total_cost
+            rep_data[name]["orders"].append({"id": order_id, "title": f"{ord.get('company',{}).get('name','Unknown')} - {ord.get('opportunity',{}).get('name','Direct')}", "total": rev, "profit": rev - total_cost})
 
-        all_reps = set(rep_created.keys()) | set(rep_won.keys()) | set(rep_lost.keys()) | set(rep_revenue.keys()) | set(rep_activities.keys())
+        final_users = []
+        for name, d in rep_data.items():
+            if name.lower() == "unassigned" or d["revenue"] <= 0: continue
+            profit = d["revenue"] - d["cost"]
+            # PROFIT MARGIN CALCULATION
+            margin_pct = round((profit / d["revenue"]) * 100) if d["revenue"] > 0 else 0
+            final_users.append({**d, "name": name, "profit": profit, "profit_margin": margin_pct, "orders": sorted(d["orders"], key=lambda x: x["total"], reverse=True)})
 
-        users_result = []
-        for name in sorted(all_reps):
-            if name.lower() == "unassigned": continue
-            if rep_revenue[name] <= 0: continue 
-
-            total_closed = rep_won[name] + rep_lost[name]
-            win_rate = round((rep_won[name] / total_closed * 100)) if total_closed > 0 else 0
-            profit = rep_revenue[name] - rep_cost[name]
-            
-            # Sort individual orders from highest revenue to lowest
-            sorted_orders = sorted(rep_orders[name], key=lambda x: x["total"], reverse=True)
-
-            users_result.append({
-                "name": name,
-                "created": rep_created[name],
-                "won": rep_won[name],
-                "lost": rep_lost[name],
-                "win_rate": win_rate,
-                "revenue": rep_revenue[name],
-                "cost": rep_cost[name],
-                "profit": profit,
-                "activities": rep_activities[name],
-                "orders": sorted_orders # NEW: Include the orders array
-            })
-
-        # Sort reps by most Revenue
-        users_result.sort(key=lambda u: u["revenue"], reverse=True)
-
-        total_won = sum(rep_won.values())
-        total_lost = sum(rep_lost.values())
-        total_closed = total_won + total_lost
-        total_rev = sum(rep_revenue.values())
-        total_cst = sum(rep_cost.values())
+        final_users.sort(key=lambda u: u["revenue"], reverse=True)
+        total_rev = sum(u["revenue"] for u in final_users)
+        total_profit = sum(u["profit"] for u in final_users)
 
         return jsonify({
             "totals": {
-                "created": sum(rep_created.values()),
-                "won": total_won,
-                "winRate": round((total_won / total_closed * 100)) if total_closed > 0 else 0,
+                "created": sum(u["created"] for u in final_users),
+                "won": sum(u["won"] for u in final_users),
                 "revenue": total_rev,
-                "cost": total_cst,
-                "profit": total_rev - total_cst,
-                "activities": sum(rep_activities.values())
+                "profit": total_profit,
+                "margin": round((total_profit / total_rev) * 100) if total_rev > 0 else 0,
+                "activities": sum(u["activities"] for u in final_users)
             },
-            "users": users_result,
+            "users": final_users,
             "daily": list(daily_buckets.values()),
-            "asOf": now.isoformat(),
-            "daysBack": days_back_val
+            "timeframeLabel": timeframe_label
         })
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/config-check")
-def config_check():
-    configured = all([CW_COMPANY, CW_PUBLIC_KEY, CW_PRIVATE_KEY, CW_CLIENT_ID])
-    return jsonify({"configured": configured})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+if __name__ == "__main__": app.run(host="0.0.0.0", port=5000)
