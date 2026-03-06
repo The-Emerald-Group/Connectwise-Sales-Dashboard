@@ -20,7 +20,7 @@ CW_PUBLIC_KEY  = os.environ.get("CW_PUBLIC_KEY", "")
 CW_PRIVATE_KEY = os.environ.get("CW_PRIVATE_KEY", "")
 CW_CLIENT_ID   = os.environ.get("CW_CLIENT_ID", "")
 HTTPS_PROXY    = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
-REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "300"))
+REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "600"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 SYNC_DAYS_BACK = int(os.environ.get("SYNC_DAYS_BACK", "730"))
 
@@ -134,10 +134,8 @@ def harvest_data():
 
         time.sleep(REFRESH_INTERVAL)
 
-# --- FIX: Start the harvester globally so Gunicorn executes it immediately ---
 harvester_thread = threading.Thread(target=harvest_data, daemon=True)
 harvester_thread.start()
-# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -178,6 +176,7 @@ def sales_stats():
             ds = parse_cw_date(act.get("dateStart"))
             if ds and since <= ds <= until: recent_activities.append(act)
 
+        # Chart Buckets Setup
         daily_buckets = {}
         days_range = (until.date() - since.date()).days + 1
         
@@ -188,20 +187,23 @@ def sales_stats():
         while temp_date <= until:
             key = temp_date.strftime(chart_bucket_format)
             if key not in daily_buckets:
-                daily_buckets[key] = {"date": temp_date.strftime(chart_label_format), "created": 0, "won": 0}
+                # Set up Revenue and Profit tracking for the chart instead of Leads/Won
+                daily_buckets[key] = {"date": temp_date.strftime(chart_label_format), "revenue": 0.0, "profit": 0.0}
             temp_date += timedelta(days=32 if days_range > 100 else 1)
             if days_range > 100: temp_date = temp_date.replace(day=1)
 
-        for o in created_opps:
-            k = parse_cw_date(o["dateBecameLead"]).strftime(chart_bucket_format)
-            if k in daily_buckets: daily_buckets[k]["created"] += 1
-            
-        for o in closed_opps:
-            k = parse_cw_date(o["closedDate"]).strftime(chart_bucket_format)
-            if k in daily_buckets:
-                if "won" in o.get("stage", {}).get("name", "").lower() or "won" in o.get("status", {}).get("name", "").lower():
-                    daily_buckets[k]["won"] += 1
+        # Process orders to build the new Chart data
+        for ord in recent_orders:
+            od = parse_cw_date(ord.get("orderDate"))
+            if od:
+                k = od.strftime(chart_bucket_format)
+                if k in daily_buckets:
+                    rev = float(ord.get("total", 0.0))
+                    cost = float(ord.get("_calculated_cost", 0.0))
+                    daily_buckets[k]["revenue"] += rev
+                    daily_buckets[k]["profit"] += (rev - cost)
 
+        # Rep Aggregation (Unchanged)
         rep_data = defaultdict(lambda: {"created": 0, "won": 0, "lost": 0, "revenue": 0.0, "cost": 0.0, "activities": 0, "orders": []})
         
         def get_rep_name(obj, field="primarySalesRep"):
