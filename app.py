@@ -22,7 +22,7 @@ CW_CLIENT_ID   = os.environ.get("CW_CLIENT_ID", "")
 HTTPS_PROXY    = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
 REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "300"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
-SYNC_DAYS_BACK = int(os.environ.get("SYNC_DAYS_BACK", "730")) # Grab 2 years of history by default
+SYNC_DAYS_BACK = int(os.environ.get("SYNC_DAYS_BACK", "730"))
 
 # Persistent Data Storage
 DATA_DIR = "/data"
@@ -61,7 +61,7 @@ def cw_get(endpoint, params=None):
     headers = get_auth_header()
     all_results = []
     page = 1
-    page_size = 1000 # Larger page size for faster background sync
+    page_size = 1000 
     if params is None: params = {}
     session = get_session()
     while True:
@@ -92,7 +92,6 @@ def harvest_data():
     
     while True:
         try:
-            # 1. Load existing data from disk if memory is empty
             if not DATA_STORE.get("last_sync") and os.path.exists(DATA_FILE):
                 with open(DATA_FILE, 'r') as f:
                     DATA_STORE.update(json.load(f))
@@ -100,20 +99,16 @@ def harvest_data():
             sync_since = DATA_STORE.get("last_sync")
             
             if not sync_since:
-                # First ever run: Calculate how far back to look
                 sync_since = (datetime.now(timezone.utc) - timedelta(days=SYNC_DAYS_BACK)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 log(f"Starting initial historical harvest (Last {SYNC_DAYS_BACK} days). This may take several minutes...")
             else:
                 log(f"Harvesting changes since {sync_since}...")
 
-            # Fetch OPPS updated since last run
             opps = cw_get("/sales/opportunities", {"conditions": f"lastUpdated >= [{sync_since}]"})
             for o in opps: DATA_STORE["opportunities"][str(o["id"])] = o
 
-            # Fetch ORDERS updated since last run
             orders = cw_get("/sales/orders", {"conditions": f"lastUpdated >= [{sync_since}]"})
             for o in orders:
-                # Automatically calculate sub-cost for new or modified orders
                 cost = 0.0
                 if o.get("productIds"):
                     products = cw_get("/procurement/products", {"conditions": f"id in ({','.join(map(str, o['productIds']))})", "fields": "cost,quantity"})
@@ -122,13 +117,11 @@ def harvest_data():
                 o["_calculated_cost"] = cost
                 DATA_STORE["orders"][str(o["id"])] = o
 
-            # Fetch ACTIVITIES updated since last run
             acts = cw_get("/sales/activities", {"conditions": f"lastUpdated >= [{sync_since}]"})
             for a in acts: DATA_STORE["activities"][str(a["id"])] = a
 
             DATA_STORE["last_sync"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            # Save cleanly to disk
             with open(TEMP_DATA_FILE, 'w') as f:
                 json.dump(DATA_STORE, f)
             os.replace(TEMP_DATA_FILE, DATA_FILE)
@@ -140,6 +133,11 @@ def harvest_data():
             log(traceback.format_exc())
 
         time.sleep(REFRESH_INTERVAL)
+
+# --- FIX: Start the harvester globally so Gunicorn executes it immediately ---
+harvester_thread = threading.Thread(target=harvest_data, daemon=True)
+harvester_thread.start()
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -161,13 +159,11 @@ def sales_stats():
         if not since or not until:
             return jsonify({"error": "Invalid date format"}), 400
 
-        # Memory Arrays for specific date range
         created_opps = []
         closed_opps = []
         recent_orders = []
         recent_activities = []
 
-        # Instantly filter records in memory
         for opp in DATA_STORE["opportunities"].values():
             dl = parse_cw_date(opp.get("dateBecameLead"))
             dc = parse_cw_date(opp.get("closedDate"))
@@ -182,21 +178,17 @@ def sales_stats():
             ds = parse_cw_date(act.get("dateStart"))
             if ds and since <= ds <= until: recent_activities.append(act)
 
-        # Chart Buckets
         daily_buckets = {}
         days_range = (until.date() - since.date()).days + 1
         
-        # Prevent huge graphs if viewing a year+
         chart_bucket_format = "%Y-%m" if days_range > 100 else "%Y-%m-%d"
         chart_label_format = "%b %Y" if days_range > 100 else ("%d %b" if days_range > 7 else "%A")
 
-        # Prep empty buckets
         temp_date = since
         while temp_date <= until:
             key = temp_date.strftime(chart_bucket_format)
             if key not in daily_buckets:
                 daily_buckets[key] = {"date": temp_date.strftime(chart_label_format), "created": 0, "won": 0}
-            # Step by days or months
             temp_date += timedelta(days=32 if days_range > 100 else 1)
             if days_range > 100: temp_date = temp_date.replace(day=1)
 
@@ -210,7 +202,6 @@ def sales_stats():
                 if "won" in o.get("stage", {}).get("name", "").lower() or "won" in o.get("status", {}).get("name", "").lower():
                     daily_buckets[k]["won"] += 1
 
-        # Aggregation
         rep_data = defaultdict(lambda: {"created": 0, "won": 0, "lost": 0, "revenue": 0.0, "cost": 0.0, "activities": 0, "orders": []})
         
         def get_rep_name(obj, field="primarySalesRep"):
@@ -263,6 +254,4 @@ def sales_stats():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__": 
-    # Start the harvester thread before running the web server
-    threading.Thread(target=harvest_data, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
