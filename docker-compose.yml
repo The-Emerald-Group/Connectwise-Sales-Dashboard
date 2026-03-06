@@ -6,7 +6,6 @@ services:
       - "5002:5000"
 
     volumes:
-      # This saves your data permanently so it doesn't reset on reboot
       - cw_sales_data:/data
 
     environment:
@@ -22,10 +21,11 @@ services:
 
       # ── Harvester Settings ─────────────────────────────────────────────────
       - CW_REFRESH_INTERVAL=300
-      - SYNC_DAYS_BACK=730  # How many days of history to grab on the very first boot
+      - SYNC_DAYS_BACK=730
 
     restart: unless-stopped
     healthcheck:
+      # FIX: Ensure it explicitly pings 'http://localhost:5000/' 
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
       timeout: 10s
