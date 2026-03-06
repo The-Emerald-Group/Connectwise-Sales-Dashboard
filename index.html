@@ -66,6 +66,8 @@
   .order-profit { color: var(--warn); font-size: 0.65rem; }
   
   .chart-container { background: var(--card-bg); border-radius: 12px; padding: 20px; margin-bottom: 40px;}
+  .chart-panel-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+  .chart-panel-title { font-size:1rem; font-weight:bold; }
   .chart-wrap { height: 260px; position: relative;}
   
   .loader { text-align: center; padding: 50px; color: var(--text-dim); font-size: 0.9rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px;}
@@ -114,7 +116,6 @@
 let trendChart = null;
 let currentMode = 'rolling';
 
-// Initialize Year Dropdown with the last 5 years
 const yearSelect = document.getElementById('yearSelect');
 const currentYear = new Date().getFullYear();
 for (let i = 0; i < 5; i++) {
@@ -124,8 +125,7 @@ for (let i = 0; i < 5; i++) {
     yearSelect.appendChild(opt);
 }
 
-// Automatically select current quarter based on today's month
-const currentMonth = new Date().getMonth(); // 0-11
+const currentMonth = new Date().getMonth(); 
 const currentQ = Math.floor(currentMonth / 3) + 1;
 document.getElementById('quarterSelect').value = currentQ.toString();
 
@@ -171,10 +171,8 @@ async function loadStats() {
       const q = parseInt(document.getElementById('quarterSelect').value);
       const y = parseInt(document.getElementById('yearSelect').value);
       
-      // Calculate precise UTC boundaries for the selected quarter
       const startMonth = (q - 1) * 3;
       const since = new Date(Date.UTC(y, startMonth, 1, 0, 0, 0));
-      // Day 0 of next month gives us the last day of the current month
       const until = new Date(Date.UTC(y, startMonth + 3, 0, 23, 59, 59));
       
       sinceStr = since.toISOString();
@@ -185,7 +183,6 @@ async function loadStats() {
   try {
     const res = await fetch(`/api/sales-stats?since=${encodeURIComponent(sinceStr)}&until=${encodeURIComponent(untilStr)}&label=${encodeURIComponent(label)}`);
     
-    // Handle the "Initial Sync" status elegantly
     if (res.status === 503) {
         document.getElementById('main-content').innerHTML = `
             <div class="loader">
@@ -193,7 +190,7 @@ async function loadStats() {
                 Building Local Database...<br>
                 <span style="font-size:0.7rem; color:#666; display:block; margin-top:10px; font-weight:normal;">Fetching historical records from ConnectWise API. This only happens once on boot. Retrying in 10s...</span>
             </div>`;
-        setTimeout(loadStats, 10000); // Retry automatically
+        setTimeout(loadStats, 10000); 
         return;
     }
 
@@ -231,24 +228,76 @@ async function loadStats() {
           </div>`).join('')}</div>
       </div>`).join('');
 
-    document.getElementById('main-content').innerHTML = kpiHTML + `<div class="chart-container"><div class="chart-wrap"><canvas id="trendChart"></canvas></div></div><div class="grid">${userCards}</div>`;
+    // Render the new Revenue/Profit hybrid chart container
+    document.getElementById('main-content').innerHTML = kpiHTML + `
+        <div class="chart-container">
+            <div class="chart-panel-header"><div class="chart-panel-title">Revenue & Profit Trend</div></div>
+            <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+        </div>
+        <div class="grid">${userCards}</div>`;
 
+    // Render Chart.js with dual types (Bar for revenue, Line for profit)
     const ctx = document.getElementById('trendChart').getContext('2d');
     if (trendChart) trendChart.destroy();
+    
     trendChart = new Chart(ctx, { 
-        type: 'line', 
+        type: 'bar', 
         data: { 
             labels: daily.map(d => d.date), 
             datasets: [
-                { label: 'Leads', data: daily.map(d => d.created), borderColor: 'rgba(10,132,255,0.8)', tension: 0.3, fill: true, backgroundColor: 'rgba(10,132,255,0.05)' },
-                { label: 'Won', data: daily.map(d => d.won), borderColor: 'rgba(191,90,242,0.8)', tension: 0.3, fill: true, backgroundColor: 'rgba(191,90,242,0.05)' }
+                { 
+                    type: 'line',
+                    label: 'Estimated Profit', 
+                    data: daily.map(d => d.profit), 
+                    borderColor: '#ffcc00', 
+                    backgroundColor: '#ffcc00',
+                    borderWidth: 2,
+                    tension: 0.3,
+                    pointRadius: 3
+                },
+                { 
+                    type: 'bar',
+                    label: 'Revenue', 
+                    data: daily.map(d => d.revenue), 
+                    backgroundColor: 'rgba(76, 217, 100, 0.2)', 
+                    borderColor: '#4cd964',
+                    borderWidth: 1,
+                    borderRadius: 4
+                }
             ]
         }, 
         options: { 
             responsive: true, 
             maintainAspectRatio: false, 
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            let label = context.dataset.label || '';
+                            if (label) { label += ': '; }
+                            if (context.parsed.y !== null) {
+                                label += new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(context.parsed.y);
+                            }
+                            return label;
+                        }
+                    }
+                }
+            },
             scales: { 
-                y: { beginAtZero: true, grid: { color: '#1e1e1e' }, ticks: { precision: 0 } }, 
+                y: { 
+                    beginAtZero: true, 
+                    grid: { color: '#1e1e1e' }, 
+                    ticks: { 
+                        callback: function(value) {
+                            if (value >= 1000) return '£' + (value / 1000) + 'k';
+                            return '£' + value;
+                        }
+                    } 
+                }, 
                 x: { grid: { display: false } } 
             } 
         } 
@@ -259,7 +308,6 @@ async function loadStats() {
   }
 }
 
-// Start auto-refresh for the UI (the backend will sync continuously on its own)
 setInterval(loadStats, 30000);
 loadStats();
 
