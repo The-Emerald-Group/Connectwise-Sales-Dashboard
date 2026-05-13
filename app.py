@@ -76,11 +76,37 @@ def cw_get(endpoint, params=None):
     return all_results
 
 def parse_cw_date(d_str):
-    if not d_str: return None
+    """Parse any ISO-8601 datetime CW (or the dashboard) might emit.
+
+    Handles: trailing 'Z', fractional seconds, explicit offsets like '-04:00',
+    and bare 'YYYY-MM-DD' date-only values. Always returns a tz-aware UTC
+    datetime (or None)."""
+    if not d_str:
+        return None
+    if isinstance(d_str, datetime):
+        return d_str if d_str.tzinfo else d_str.replace(tzinfo=timezone.utc)
     try:
-        clean_str = d_str.split('.')[0].replace("Z", "")
-        dt = datetime.fromisoformat(clean_str + "+00:00")
-        return dt
+        s = str(d_str).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            # Date-only ("2024-03-15") or odd separators – fall back.
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                dt = datetime.fromisoformat(s + "T00:00:00+00:00")
+            else:
+                # Last resort: strip fractional seconds and any trailing offset.
+                base = s.split(".")[0].split("+")[0].split("-")
+                # Re-join YYYY-MM-DDTHH:MM:SS (first 3 dash-separated parts).
+                if len(base) >= 3:
+                    head = "-".join(base[:3])
+                    dt = datetime.fromisoformat(head + "+00:00")
+                else:
+                    return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -163,18 +189,22 @@ def sales_stats():
         recent_activities = []
 
         for opp in DATA_STORE["opportunities"].values():
-            dl = parse_cw_date(opp.get("dateBecameLead"))
+            dl = parse_cw_date(opp.get("dateBecameLead") or opp.get("dateEntered"))
             dc = parse_cw_date(opp.get("closedDate"))
             if dl and since <= dl <= until: created_opps.append(opp)
             if dc and since <= dc <= until: closed_opps.append(opp)
-                
+
         for ord in DATA_STORE["orders"].values():
-            od = parse_cw_date(ord.get("orderDate"))
+            od = parse_cw_date(ord.get("orderDate") or ord.get("dateEntered"))
             if od and since <= od <= until: recent_orders.append(ord)
-                
+
         for act in DATA_STORE["activities"].values():
-            ds = parse_cw_date(act.get("dateStart"))
+            ds = parse_cw_date(act.get("dateStart") or act.get("dateEntered"))
             if ds and since <= ds <= until: recent_activities.append(act)
+
+        log(f"[sales-stats] {timeframe_label} {since.isoformat()} -> {until.isoformat()} | "
+            f"matched opps(created/closed)={len(created_opps)}/{len(closed_opps)} "
+            f"orders={len(recent_orders)} activities={len(recent_activities)}")
 
         # Chart Buckets Setup
         daily_buckets = {}
@@ -205,31 +235,52 @@ def sales_stats():
 
         # Rep Aggregation (Unchanged)
         rep_data = defaultdict(lambda: {"created": 0, "won": 0, "lost": 0, "revenue": 0.0, "cost": 0.0, "activities": 0, "orders": []})
-        
-        def get_rep_name(obj, field="primarySalesRep"):
-            rep = obj.get(field)
-            return rep.get("name", "Unassigned") if isinstance(rep, dict) else "Unassigned"
 
-        for o in created_opps: rep_data[get_rep_name(o)]["created"] += 1
+        # CW order entities use a few different field names for the rep depending
+        # on tenant/version; try each in order and fall back to "Unassigned".
+        REP_FIELD_CANDIDATES = {
+            "opportunity": ("primarySalesRep", "salesRep", "owner"),
+            "order":       ("salesRep", "primarySalesRep", "owner"),
+            "activity":    ("assignTo", "ownerResource", "assignedBy"),
+        }
+
+        def get_rep_name(obj, kind):
+            for field in REP_FIELD_CANDIDATES.get(kind, ()):
+                rep = obj.get(field)
+                if isinstance(rep, dict):
+                    name = rep.get("name") or rep.get("identifier")
+                    if name:
+                        return name
+                elif isinstance(rep, str) and rep.strip():
+                    return rep.strip()
+            return "Unassigned"
+
+        for o in created_opps:
+            rep_data[get_rep_name(o, "opportunity")]["created"] += 1
         for o in closed_opps:
             key = "won" if ("won" in o.get("stage",{}).get("name","").lower() or "won" in o.get("status",{}).get("name","").lower()) else "lost"
-            rep_data[get_rep_name(o)][key] += 1
-            
-        for act in recent_activities: 
-            rep_data[get_rep_name(act, "assignTo")]["activities"] += 1
+            rep_data[get_rep_name(o, "opportunity")][key] += 1
+
+        for act in recent_activities:
+            rep_data[get_rep_name(act, "activity")]["activities"] += 1
 
         for ord in recent_orders:
-            name = get_rep_name(ord, "salesRep")
-            rev = float(ord.get("total", 0.0))
-            total_cost = float(ord.get("_calculated_cost", 0.0))
-            
+            name = get_rep_name(ord, "order")
+            rev = float(ord.get("total", 0.0) or 0.0)
+            total_cost = float(ord.get("_calculated_cost", 0.0) or 0.0)
+
             rep_data[name]["revenue"] += rev
             rep_data[name]["cost"] += total_cost
             rep_data[name]["orders"].append({"id": ord["id"], "title": f"{ord.get('company',{}).get('name','Unknown')} - {ord.get('opportunity',{}).get('name','Direct')}", "total": rev, "profit": rev - total_cost})
 
+        # Keep "Unassigned" so revenue/profit/activity that isn't tied to a named
+        # rep is still reflected in the dashboard. Only drop reps with no activity
+        # at all (no revenue, no opps, no activities).
         final_users = []
         for name, d in rep_data.items():
-            if name.lower() == "unassigned" or d["revenue"] <= 0: continue
+            has_any = d["revenue"] > 0 or d["created"] > 0 or d["won"] > 0 or d["lost"] > 0 or d["activities"] > 0
+            if not has_any:
+                continue
             profit = d["revenue"] - d["cost"]
             margin_pct = round((profit / d["revenue"]) * 100) if d["revenue"] > 0 else 0
             final_users.append({**d, "name": name, "profit": profit, "profit_margin": margin_pct, "orders": sorted(d["orders"], key=lambda x: x["total"], reverse=True)})
@@ -255,5 +306,72 @@ def sales_stats():
         log(f"API Error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__": 
+
+@app.route("/api/debug")
+def debug_store():
+    """Diagnostic snapshot of what the harvester actually pulled.
+
+    Helps answer questions like 'is orderDate populated?' or 'do orders have a
+    salesRep set?' without dumping the full dataset."""
+    def date_range(records, *fields):
+        dates = []
+        for r in records:
+            for f in fields:
+                d = parse_cw_date(r.get(f))
+                if d:
+                    dates.append(d)
+                    break
+        if not dates:
+            return {"min": None, "max": None, "parsed": 0, "total": len(records)}
+        return {
+            "min": min(dates).isoformat(),
+            "max": max(dates).isoformat(),
+            "parsed": len(dates),
+            "total": len(records),
+        }
+
+    def top_reps(records, *fields, limit=10):
+        counts = defaultdict(int)
+        for r in records:
+            name = None
+            for f in fields:
+                rep = r.get(f)
+                if isinstance(rep, dict):
+                    name = rep.get("name") or rep.get("identifier")
+                    if name:
+                        break
+                elif isinstance(rep, str) and rep.strip():
+                    name = rep.strip()
+                    break
+            counts[name or "Unassigned"] += 1
+        return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+    opps = list(DATA_STORE["opportunities"].values())
+    orders = list(DATA_STORE["orders"].values())
+    acts = list(DATA_STORE["activities"].values())
+
+    sample_order = orders[0] if orders else None
+    sample_opp = opps[0] if opps else None
+
+    return jsonify({
+        "last_sync": DATA_STORE.get("last_sync"),
+        "counts": {"opportunities": len(opps), "orders": len(orders), "activities": len(acts)},
+        "orders": {
+            "orderDate_range": date_range(orders, "orderDate", "dateEntered"),
+            "rep_breakdown":   top_reps(orders, "salesRep", "primarySalesRep", "owner"),
+            "with_total_gt_0": sum(1 for o in orders if float(o.get("total") or 0) > 0),
+            "sample_keys":     sorted(sample_order.keys()) if sample_order else [],
+            "sample":          sample_order,
+        },
+        "opportunities": {
+            "dateBecameLead_range": date_range(opps, "dateBecameLead", "dateEntered"),
+            "closedDate_range":     date_range(opps, "closedDate"),
+            "rep_breakdown":        top_reps(opps, "primarySalesRep", "salesRep", "owner"),
+            "sample_keys":          sorted(sample_opp.keys()) if sample_opp else [],
+            "sample":               sample_opp,
+        },
+    })
+
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
