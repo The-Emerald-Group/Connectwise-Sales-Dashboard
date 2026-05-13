@@ -110,6 +110,62 @@ def parse_cw_date(d_str):
     except Exception:
         return None
 
+def _log_store_diagnostics():
+    """Dump a one-line summary of date fields & rep fields into the logs so we
+    can diagnose 'matched 0 records' issues without needing an HTTP endpoint
+    (some hosting proxies block /api/debug-style paths)."""
+    try:
+        orders = list(DATA_STORE["orders"].values())
+        opps = list(DATA_STORE["opportunities"].values())
+
+        def date_summary(records, fields):
+            counts = {f: 0 for f in fields}
+            parsed = []
+            for r in records:
+                for f in fields:
+                    v = r.get(f)
+                    if v:
+                        counts[f] += 1
+                d = None
+                for f in fields:
+                    d = parse_cw_date(r.get(f))
+                    if d:
+                        break
+                if d:
+                    parsed.append(d)
+            rng = (min(parsed).date().isoformat(), max(parsed).date().isoformat()) if parsed else (None, None)
+            return counts, rng, len(parsed)
+
+        def rep_summary(records, fields):
+            counts = defaultdict(int)
+            for r in records:
+                name = None
+                for f in fields:
+                    rep = r.get(f)
+                    if isinstance(rep, dict):
+                        name = rep.get("name") or rep.get("identifier")
+                        if name: break
+                    elif isinstance(rep, str) and rep.strip():
+                        name = rep.strip(); break
+                counts[name or "Unassigned"] += 1
+            return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:5])
+
+        if orders:
+            sample = orders[0]
+            c, rng, parsed = date_summary(orders, ["orderDate", "dateEntered", "billDate", "shipDate"])
+            log(f"[diag] orders sample keys: {sorted(sample.keys())}")
+            log(f"[diag] orders date field populated counts: {c} | parseable date range: {rng[0]}..{rng[1]} ({parsed}/{len(orders)})")
+            log(f"[diag] orders top reps: {rep_summary(orders, ['salesRep','primarySalesRep','owner'])}")
+        if opps:
+            sample = opps[0]
+            c, rng, parsed = date_summary(opps, ["dateBecameLead", "dateEntered", "closedDate", "expectedCloseDate"])
+            log(f"[diag] opps sample keys: {sorted(sample.keys())}")
+            log(f"[diag] opps date field populated counts: {c} | parseable lead-date range: {rng[0]}..{rng[1]} ({parsed}/{len(opps)})")
+            log(f"[diag] opps top reps: {rep_summary(opps, ['primarySalesRep','salesRep','owner'])}")
+    except Exception as e:
+        log(f"[diag] failed to log diagnostics: {e}")
+
+
 # --- BACKGROUND HARVESTER THREAD ---
 def harvest_data():
     global DATA_STORE
@@ -153,6 +209,7 @@ def harvest_data():
             os.replace(TEMP_DATA_FILE, DATA_FILE)
             
             log(f"Harvest complete. Opps: {len(DATA_STORE['opportunities'])}, Orders: {len(DATA_STORE['orders'])}, Acts: {len(DATA_STORE['activities'])}")
+            _log_store_diagnostics()
 
         except Exception as e:
             log(f"!! Harvest error: {str(e)}")
@@ -307,7 +364,7 @@ def sales_stats():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/debug")
+@app.route("/api/inspect")
 def debug_store():
     """Diagnostic snapshot of what the harvester actually pulled.
 
