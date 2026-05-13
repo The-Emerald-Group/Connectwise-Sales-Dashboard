@@ -365,13 +365,18 @@ def sales_stats():
             rep_data[name]["cost"] += total_cost
             rep_data[name]["orders"].append({"id": ord["id"], "title": f"{ord.get('company',{}).get('name','Unknown')} - {ord.get('opportunity',{}).get('name','Direct')}", "total": rev, "profit": rev - total_cost})
 
-        # Keep "Unassigned" so revenue/profit/activity that isn't tied to a named
-        # rep is still reflected in the dashboard. Only drop reps with no activity
-        # at all (no revenue, no opps, no activities).
+        # A rep gets a card only if they have *real* sales engagement in the
+        # window: revenue, or at least one opp created / won / lost. Pure-activity
+        # users (e.g. service techs who logged a call against a sales record) are
+        # dropped so the grid stays focused on the actual sales team. Their
+        # activity counts are also excluded from the Sales Hustle KPI for the
+        # same reason — keeps the headline number consistent with the cards.
         final_users = []
         for name, d in rep_data.items():
-            has_any = d["revenue"] > 0 or d["created"] > 0 or d["won"] > 0 or d["lost"] > 0 or d["activities"] > 0
-            if not has_any:
+            qualifies = d["revenue"] > 0 or d["created"] > 0 or d["won"] > 0 or d["lost"] > 0
+            if not qualifies:
+                continue
+            if name.lower() == "unassigned" and d["revenue"] <= 0 and d["won"] <= 0:
                 continue
             profit = d["revenue"] - d["cost"]
             margin_pct = round((profit / d["revenue"]) * 100) if d["revenue"] > 0 else 0
