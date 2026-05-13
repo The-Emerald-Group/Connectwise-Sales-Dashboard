@@ -23,6 +23,9 @@ HTTPS_PROXY    = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") 
 REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "600"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 SYNC_DAYS_BACK = int(os.environ.get("SYNC_DAYS_BACK", "730"))
+# Re-fetch this many minutes of overlap on incremental sync so a clock skew
+# between our server and CW (or CW indexing lag) cannot permanently skip rows.
+SYNC_OVERLAP_MINUTES = int(os.environ.get("SYNC_OVERLAP_MINUTES", "30"))
 
 # Persistent Data Storage
 DATA_DIR = "/data"
@@ -110,6 +113,21 @@ def parse_cw_date(d_str):
     except Exception:
         return None
 
+
+def harvest_query_since(cursor_str):
+    """UTC timestamp for CW `lastUpdated >= [...]` on incremental runs.
+
+    Subtracts SYNC_OVERLAP_MINUTES from the stored cursor so minor clock skew
+    between this host and ConnectWise cannot permanently skip changed rows."""
+    if not cursor_str or SYNC_OVERLAP_MINUTES <= 0:
+        return cursor_str
+    dt = parse_cw_date(cursor_str)
+    if not dt:
+        return cursor_str
+    dt = dt - timedelta(minutes=SYNC_OVERLAP_MINUTES)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _log_store_diagnostics():
     """Dump a one-line summary of date fields & rep fields into the logs so we
     can diagnose 'matched 0 records' issues without needing an HTTP endpoint
@@ -189,17 +207,22 @@ def harvest_data():
                     DATA_STORE.update(json.load(f))
                     
             sync_since = DATA_STORE.get("last_sync")
-            
+            query_since = sync_since
+
             if not sync_since:
-                sync_since = (datetime.now(timezone.utc) - timedelta(days=SYNC_DAYS_BACK)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                query_since = (datetime.now(timezone.utc) - timedelta(days=SYNC_DAYS_BACK)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 log(f"Starting initial historical harvest (Last {SYNC_DAYS_BACK} days). This may take several minutes...")
             else:
-                log(f"Harvesting changes since {sync_since}...")
+                query_since = harvest_query_since(sync_since)
+                if query_since != sync_since:
+                    log(f"Harvesting changes since {query_since} (cursor {sync_since}, overlap {SYNC_OVERLAP_MINUTES}m)...")
+                else:
+                    log(f"Harvesting changes since {sync_since}...")
 
-            opps = cw_get("/sales/opportunities", {"conditions": f"lastUpdated >= [{sync_since}]"})
+            opps = cw_get("/sales/opportunities", {"conditions": f"lastUpdated >= [{query_since}]"})
             for o in opps: DATA_STORE["opportunities"][str(o["id"])] = o
 
-            orders = cw_get("/sales/orders", {"conditions": f"lastUpdated >= [{sync_since}]"})
+            orders = cw_get("/sales/orders", {"conditions": f"lastUpdated >= [{query_since}]"})
             for o in orders:
                 cost = 0.0
                 if o.get("productIds"):
@@ -209,8 +232,10 @@ def harvest_data():
                 o["_calculated_cost"] = cost
                 DATA_STORE["orders"][str(o["id"])] = o
 
-            acts = cw_get("/sales/activities", {"conditions": f"lastUpdated >= [{sync_since}]"})
+            acts = cw_get("/sales/activities", {"conditions": f"lastUpdated >= [{query_since}]"})
             for a in acts: DATA_STORE["activities"][str(a["id"])] = a
+
+            log(f"This cycle fetched from CW: opps={len(opps)}, orders={len(orders)}, activities={len(acts)}")
 
             DATA_STORE["last_sync"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
