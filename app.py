@@ -150,18 +150,28 @@ def _log_store_diagnostics():
                 counts[name or "Unassigned"] += 1
             return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:5])
 
+        def max_last_updated(records):
+            best = None
+            for r in records:
+                d = parse_cw_date((r.get("_info") or {}).get("lastUpdated"))
+                if d and (best is None or d > best):
+                    best = d
+            return best.isoformat() if best else None
+
         if orders:
             sample = orders[0]
             c, rng, parsed = date_summary(orders, ["orderDate", "dateEntered", "billDate", "shipDate"])
             log(f"[diag] orders sample keys: {sorted(sample.keys())}")
             log(f"[diag] orders date field populated counts: {c} | parseable date range: {rng[0]}..{rng[1]} ({parsed}/{len(orders)})")
             log(f"[diag] orders top reps: {rep_summary(orders, ['salesRep','primarySalesRep','owner'])}")
+            log(f"[diag] orders max _info.lastUpdated: {max_last_updated(orders)}")
         if opps:
             sample = opps[0]
             c, rng, parsed = date_summary(opps, ["dateBecameLead", "dateEntered", "closedDate", "expectedCloseDate"])
             log(f"[diag] opps sample keys: {sorted(sample.keys())}")
             log(f"[diag] opps date field populated counts: {c} | parseable lead-date range: {rng[0]}..{rng[1]} ({parsed}/{len(opps)})")
             log(f"[diag] opps top reps: {rep_summary(opps, ['primarySalesRep','salesRep','owner'])}")
+            log(f"[diag] opps max _info.lastUpdated: {max_last_updated(opps)}")
     except Exception as e:
         log(f"[diag] failed to log diagnostics: {e}")
 
@@ -362,6 +372,76 @@ def sales_stats():
     except Exception as e: 
         log(f"API Error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/probe-cw")
+def probe_cw():
+    """Hit CW directly with NO lastUpdated condition (just orderBy desc) so we
+    can see what the most recent records actually are. If CW returns orders
+    dated after our harvested max, the incremental sync filter is the bug."""
+    try:
+        url = f"https://{CW_SITE}/v4_6_release/apis/3.0/sales/orders"
+        headers = get_auth_header()
+        session = get_session()
+
+        def fetch(params):
+            r = session.get(url, headers=headers, params=params, timeout=60)
+            return {"status": r.status_code, "body": r.json() if r.ok else r.text[:500]}
+
+        latest_orders = fetch({"orderBy": "_info/lastUpdated desc", "pageSize": 5})
+        latest_by_date = fetch({"orderBy": "orderDate desc", "pageSize": 5})
+
+        sync_since = DATA_STORE.get("last_sync")
+        with_condition = None
+        without_z = None
+        if sync_since:
+            with_condition = fetch({"conditions": f"lastUpdated >= [{sync_since}]", "pageSize": 5})
+            # CW tenants in tz-sensitive setups sometimes need the literal
+            # without 'Z'; probe that variant too.
+            without_z = fetch({"conditions": f"lastUpdated >= [{sync_since.rstrip('Z')}]", "pageSize": 5})
+
+        def summarize(result):
+            if not isinstance(result, dict):
+                return result
+            body = result.get("body")
+            if isinstance(body, list):
+                return {
+                    "status": result["status"],
+                    "count": len(body),
+                    "rows": [{
+                        "id": r.get("id"),
+                        "orderDate": r.get("orderDate"),
+                        "lastUpdated": (r.get("_info") or {}).get("lastUpdated"),
+                        "company": (r.get("company") or {}).get("name"),
+                    } for r in body],
+                }
+            return result
+
+        return jsonify({
+            "harvester_last_sync": sync_since,
+            "orders_orderby_lastUpdated_desc": summarize(latest_orders),
+            "orders_orderby_orderDate_desc": summarize(latest_by_date),
+            "orders_with_current_condition": summarize(with_condition),
+            "orders_with_condition_no_Z": summarize(without_z),
+        })
+    except Exception as e:
+        log(f"probe-cw error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/resync", methods=["POST", "GET"])
+def force_resync():
+    """Wipe last_sync so the next harvester cycle does a full historical pull.
+    Use this to recover from a corrupted incremental cursor."""
+    DATA_STORE["last_sync"] = None
+    try:
+        with open(TEMP_DATA_FILE, "w") as f:
+            json.dump(DATA_STORE, f)
+        os.replace(TEMP_DATA_FILE, DATA_FILE)
+    except Exception as e:
+        log(f"resync persist warning: {e}")
+    log("[resync] last_sync cleared; next harvest cycle will pull SYNC_DAYS_BACK history.")
+    return jsonify({"ok": True, "message": "last_sync cleared; full re-harvest will occur on next cycle (within REFRESH_INTERVAL seconds)."})
 
 
 @app.route("/api/inspect")
