@@ -376,29 +376,47 @@ def sales_stats():
 
 @app.route("/api/probe-cw")
 def probe_cw():
-    """Hit CW directly with NO lastUpdated condition (just orderBy desc) so we
-    can see what the most recent records actually are. If CW returns orders
-    dated after our harvested max, the incremental sync filter is the bug."""
+    """Hit CW directly with a battery of condition syntaxes against a date we
+    KNOW must return rows. Whichever variants return non-zero tell us the
+    exact syntax our harvester should be using."""
     try:
         url = f"https://{CW_SITE}/v4_6_release/apis/3.0/sales/orders"
         headers = get_auth_header()
         session = get_session()
 
+        # Allow override via ?since=YYYY-MM-DDTHH:MM:SSZ but default to a date
+        # we are confident MUST return rows (one of the rows from the previous
+        # probe was lastUpdated 2026-05-11T10:40:39Z).
+        since = request.args.get("since") or "2026-05-01T00:00:00Z"
+        since_no_z = since.rstrip("Z")
+        since_date_only = since.split("T")[0]
+
         def fetch(params):
             r = session.get(url, headers=headers, params=params, timeout=60)
-            return {"status": r.status_code, "body": r.json() if r.ok else r.text[:500]}
+            try:
+                body = r.json() if r.ok else r.text[:500]
+            except Exception:
+                body = r.text[:500]
+            return {"status": r.status_code, "body": body, "url": r.url}
 
-        latest_orders = fetch({"orderBy": "_info/lastUpdated desc", "pageSize": 5})
-        latest_by_date = fetch({"orderBy": "orderDate desc", "pageSize": 5})
+        latest_orders  = fetch({"orderBy": "_info/lastUpdated desc", "pageSize": 5})
+        latest_by_date = fetch({"orderBy": "orderDate desc",         "pageSize": 5})
 
-        sync_since = DATA_STORE.get("last_sync")
-        with_condition = None
-        without_z = None
-        if sync_since:
-            with_condition = fetch({"conditions": f"lastUpdated >= [{sync_since}]", "pageSize": 5})
-            # CW tenants in tz-sensitive setups sometimes need the literal
-            # without 'Z'; probe that variant too.
-            without_z = fetch({"conditions": f"lastUpdated >= [{sync_since.rstrip('Z')}]", "pageSize": 5})
+        variants = {
+            "A_lastUpdated_with_Z":           {"conditions": f"lastUpdated >= [{since}]"},
+            "B_lastUpdated_no_Z":             {"conditions": f"lastUpdated >= [{since_no_z}]"},
+            "C_lastUpdated_date_only":        {"conditions": f"lastUpdated >= [{since_date_only}]"},
+            "D_lastUpdated_strict_gt_with_Z": {"conditions": f"lastUpdated > [{since}]"},
+            "E_info_slash_with_Z":            {"conditions": f"_info/lastUpdated >= [{since}]"},
+            "F_info_slash_no_Z":              {"conditions": f"_info/lastUpdated >= [{since_no_z}]"},
+            "G_info_dot_with_Z":              {"conditions": f"_info.lastUpdated >= [{since}]"},
+            "H_orderDate_with_Z":             {"conditions": f"orderDate >= [{since}]"},
+            "I_dateEntered_with_Z":           {"conditions": f"dateEntered >= [{since}]"},
+        }
+        variant_results = {}
+        for name, params in variants.items():
+            params = {**params, "pageSize": 5, "orderBy": "_info/lastUpdated desc"}
+            variant_results[name] = fetch(params)
 
         def summarize(result):
             if not isinstance(result, dict):
@@ -415,14 +433,14 @@ def probe_cw():
                         "company": (r.get("company") or {}).get("name"),
                     } for r in body],
                 }
-            return result
+            return {"status": result.get("status"), "error_body": body}
 
         return jsonify({
-            "harvester_last_sync": sync_since,
+            "harvester_last_sync": DATA_STORE.get("last_sync"),
+            "probe_since": since,
             "orders_orderby_lastUpdated_desc": summarize(latest_orders),
-            "orders_orderby_orderDate_desc": summarize(latest_by_date),
-            "orders_with_current_condition": summarize(with_condition),
-            "orders_with_condition_no_Z": summarize(without_z),
+            "orders_orderby_orderDate_desc":   summarize(latest_by_date),
+            "condition_variants": {k: summarize(v) for k, v in variant_results.items()},
         })
     except Exception as e:
         log(f"probe-cw error: {e}\n{traceback.format_exc()}")
